@@ -1,6 +1,7 @@
 # Copyright (c) 2021 Mobvoi Inc. (authors: Binbin Zhang)
 #               2022 Chengdong Liang (liangchengdong@mail.nwpu.edu.cn)
 #               2022 Hongji Wang (jijijiang77@gmail.com)
+#               2023 Zhengyang Chen (chenzhengyang117@gmail.com)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,7 +37,6 @@ class Processor(IterableDataset):
 
     def set_epoch(self, epoch):
         self.source.set_epoch(epoch)
-
 
     def __iter__(self):
         """ Return an iterator over the source dataset processed by the
@@ -102,8 +102,13 @@ class DistributedSampler:
 
 class DataList(IterableDataset):
 
-    def __init__(self, lists, shuffle=True, partition=True):
+    def __init__(self,
+                 lists,
+                 shuffle=True,
+                 partition=True,
+                 repeat_dataset=True):
         self.lists = lists
+        self.repeat_dataset = repeat_dataset
         self.sampler = DistributedSampler(shuffle, partition)
 
     def set_epoch(self, epoch):
@@ -112,11 +117,20 @@ class DataList(IterableDataset):
     def __iter__(self):
         sampler_info = self.sampler.update()
         indexes = self.sampler.sample(self.lists)
-        for index in indexes:
-            # yield dict(src=src)
-            data = dict(src=self.lists[index])
-            data.update(sampler_info)
-            yield data
+        if not self.repeat_dataset:
+            for index in indexes:
+                data = dict(src=self.lists[index])
+                data.update(sampler_info)
+                yield data
+        else:
+            indexes_len = len(indexes)
+            counter = 0
+            while True:
+                index = indexes[counter % indexes_len]
+                counter += 1
+                data = dict(src=self.lists[index])
+                data.update(sampler_info)
+                yield data
 
 
 def Dataset(data_type,
@@ -125,7 +139,8 @@ def Dataset(data_type,
             spk2id_dict,
             whole_utt=False,
             reverb_lmdb_file=None,
-            noise_lmdb_file=None):
+            noise_lmdb_file=None,
+            repeat_dataset=True):
     """ Construct dataset from arguments
 
         We have two shuffle stage in the Dataset. The first is global
@@ -145,7 +160,7 @@ def Dataset(data_type,
     lists = read_lists(data_list_file)
     shuffle = configs.get('shuffle', False)
     # Global shuffle
-    dataset = DataList(lists, shuffle=shuffle)
+    dataset = DataList(lists, shuffle=shuffle, repeat_dataset=repeat_dataset)
     if data_type == 'shard':
         dataset = Processor(dataset, processor.url_opener)
         dataset = Processor(dataset, processor.tar_file_and_group)
@@ -153,9 +168,21 @@ def Dataset(data_type,
         dataset = Processor(dataset, processor.parse_raw)
     else:
         dataset = Processor(dataset, processor.parse_feat)
+
+    if configs.get('filter', True):
+        # Filter the data with unwanted length
+        filter_conf = configs.get('filter_args', {})
+        dataset = Processor(dataset,
+                            processor.filter,
+                            frame_shift=configs['fbank_args'].get(
+                                'frame_shift', 10),
+                            data_type=data_type,
+                            **filter_conf)
+
     # Local shuffle
     if shuffle:
-        dataset = Processor(dataset, processor.shuffle, **configs['shuffle_args'])
+        dataset = Processor(dataset, processor.shuffle,
+                            **configs['shuffle_args'])
 
     # spk2id
     dataset = Processor(dataset, processor.spk_to_id, spk2id_dict)
@@ -164,7 +191,8 @@ def Dataset(data_type,
         if not whole_utt:
             # random chunk
             chunk_len = num_frms = configs.get('num_frms', 200)
-            dataset = Processor(dataset, processor.random_chunk, chunk_len, 'feat')
+            dataset = Processor(dataset, processor.random_chunk, chunk_len,
+                                'feat')
     else:
         # resample
         resample_rate = configs.get('resample_rate', 16000)
@@ -172,24 +200,28 @@ def Dataset(data_type,
         # speed perturb
         speed_perturb_flag = configs.get('speed_perturb', True)
         if speed_perturb_flag:
-            dataset = Processor(dataset, processor.speed_perturb, len(spk2id_dict))
+            dataset = Processor(dataset, processor.speed_perturb,
+                                len(spk2id_dict))
         if not whole_utt:
             # random chunk
             num_frms = configs.get('num_frms', 200)
-            frame_shift = configs['fbank_args'].get('frame_shift',
-                                                    10) * resample_rate // 1000
-            frame_length = configs['fbank_args'].get('frame_length',
-                                                     25) * resample_rate // 1000
-            chunk_len = (num_frms - 1) * frame_shift + frame_length
-            dataset = Processor(dataset, processor.random_chunk, chunk_len, data_type)
+            frame_shift = configs['fbank_args'].get('frame_shift', 10)
+            frame_length = configs['fbank_args'].get('frame_length', 25)
+            chunk_len = ((num_frms - 1) * frame_shift +
+                         frame_length) * resample_rate // 1000
+            dataset = Processor(dataset, processor.random_chunk, chunk_len,
+                                data_type)
         # add reverb & noise
-        if reverb_lmdb_file and noise_lmdb_file:
+        aug_prob = configs.get('aug_prob', 0.6)
+        if (reverb_lmdb_file and noise_lmdb_file) and (aug_prob > 0.0):
             reverb_data = LmdbData(reverb_lmdb_file)
             noise_data = LmdbData(noise_lmdb_file)
-            dataset = Processor(dataset, processor.add_reverb_noise, reverb_data,
-                                noise_data, resample_rate, configs.get('aug_prob', 0.6))
+            dataset = Processor(dataset, processor.add_reverb_noise,
+                                reverb_data, noise_data, resample_rate,
+                                aug_prob)
         # compute fbank
-        dataset = Processor(dataset, processor.compute_fbank, **configs['fbank_args'])
+        dataset = Processor(dataset, processor.compute_fbank,
+                            **configs['fbank_args'])
 
     # apply cmvn
     dataset = Processor(dataset, processor.apply_cmvn)
@@ -197,6 +229,7 @@ def Dataset(data_type,
     # spec augmentation
     spec_aug_flag = configs.get('spec_aug', True)
     if spec_aug_flag:
-        dataset = Processor(dataset, processor.spec_aug, **configs['spec_aug_args'])
+        dataset = Processor(dataset, processor.spec_aug,
+                            **configs['spec_aug_args'])
 
     return dataset

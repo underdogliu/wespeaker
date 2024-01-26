@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
-import kaldiio
+
 import fire
+import kaldiio
 import numpy as np
 from tqdm import tqdm
-import logging
 
 from wespeaker.utils.file_utils import read_table
 
@@ -101,7 +102,6 @@ def main(score_norm_method,
                 enroll_idx = enroll_utt2idx[line[0]]
                 test_idx = test_utt2idx[line[1]]
                 score = float(line[2])
-
                 normed_score = 0.5 * (
                     (score - enroll_mean[enroll_idx]) / enroll_std[enroll_idx]
                     + (score - test_mean[test_idx]) / test_std[test_idx])

@@ -13,6 +13,7 @@
 | ResNet34-TSTP-emb256 | 6.63M | × | 0.941 | 1.114 | 2.026 |
 |                      |       | √ | 0.899 | 1.064 | 1.856 |
 
+* 🔥 UPDATE 2023.6.30: We support SphereFace2 loss function and obtain better and robust performance, see [#173](https://github.com/wenet-e2e/wespeaker/pull/173).
 
 * 🔥 UPDATE 2022.07.19: We apply the same setups as the winning system of CNSRC 2022 (see [cnceleb](https://github.com/wenet-e2e/wespeaker/tree/master/examples/cnceleb/v2) recipe for details), and obtain significant performance improvement compared with our previous implementation.
     * LR scheduler warmup from 0
@@ -43,10 +44,14 @@
 |                      |       | √ | √ | **0.447** | **0.657** | **1.183** |
 | RepVGG_TINY_A0       | 6.26M | × | × | 0.909 | 1.034 | 1.943 |
 |                      |       | × | √ | 0.824 | 0.953 | 1.709 |
+| CAM++                | 7.18M | × | × | 0.803 | 0.932 | 1.860 |
+|                      |       | × | √ | 0.718 | 0.879 | 1.735 |
+|                      |       | √ | x | 0.707 | 0.845 | 1.664 |
+|                      |       | √ | √ | 0.659 | 0.803 | 1.569 |
 
 
 * 🔥 UPDATE 2022.11.30: We support arc_margin_intertopk_subcenter loss function and Multi-query Multi-head Attentive Statistics Pooling, and obtain better performance especially on hard trials [VoxSRC](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/competition2021.html).
-    * See [#103](https://github.com/wenet-e2e/wespeaker/pull/103).
+    * See [#115](https://github.com/wenet-e2e/wespeaker/pull/115).
 
 
 ## PLDA results
@@ -56,9 +61,8 @@ If you are interested in the PLDA scoring (which is inferior to the simple cosin
 local/score_plda.sh --stage 1 --stop-stage 3 --exp_dir exp_name
 ```
 
-The results on ResNet293 (large margin, no asnorm) are:
+The results on ResNet34 (large margin, no asnorm) are:
 
-|Scoring method| vox1-O-clean | vox1-E-clean | vox1-H-clean |
-| :---:|:------------:|:------------:|:------------:|
-|cosine| 0.532 | 0.707 | 1.311 |
-|plda | 0.744 | 0.794 | 1.374|
+| Scoring method | vox1-O-clean | vox1-E-clean | vox1-H-clean |
+|:--------------:|:------------:|:------------:|:------------:|
+|      PLDA      |    1.207     |    1.350     |    2.528     |

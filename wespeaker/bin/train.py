@@ -14,24 +14,25 @@
 # limitations under the License.
 
 import os
-from pprint import pformat
-import fire
-import yaml
-import tableprint as tp
 import re
+from pprint import pformat
 
+import fire
+import tableprint as tp
 import torch
 import torch.distributed as dist
+import yaml
 from torch.utils.data import DataLoader
 
 import wespeaker.utils.schedulers as schedulers
-from wespeaker.models.speaker_model import get_speaker_model
-from wespeaker.models.projections import get_projection
-from wespeaker.utils.utils import get_logger, parse_config_or_kwargs, set_seed, spk2id
-from wespeaker.utils.file_utils import read_table
-from wespeaker.utils.executor import run_epoch
-from wespeaker.utils.checkpoint import load_checkpoint, save_checkpoint
 from wespeaker.dataset.dataset import Dataset
+from wespeaker.models.projections import get_projection
+from wespeaker.models.speaker_model import get_speaker_model
+from wespeaker.utils.checkpoint import load_checkpoint, save_checkpoint
+from wespeaker.utils.executor import run_epoch
+from wespeaker.utils.file_utils import read_table
+from wespeaker.utils.utils import get_logger, parse_config_or_kwargs, set_seed, \
+    spk2id
 
 
 def train(config='conf/config.yaml', **kwargs):
@@ -44,10 +45,10 @@ def train(config='conf/config.yaml', **kwargs):
     configs = parse_config_or_kwargs(config, **kwargs)
     checkpoint = configs.get('checkpoint', None)
     # dist configs
-    rank = int(os.environ['LOCAL_RANK'])
+    rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     gpu = int(configs['gpus'][rank])
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
+    torch.cuda.set_device(gpu)
     dist.init_process_group(backend='nccl')
 
     model_dir = os.path.join(configs['exp_dir'], "models")
@@ -55,10 +56,11 @@ def train(config='conf/config.yaml', **kwargs):
         try:
             os.makedirs(model_dir)
         except IOError:
-            print(model_dir + " already exists !!!")
+            print("[warning] " + model_dir + " already exists !!!")
             if checkpoint is None:
+                print("[error] checkpoint is null !")
                 exit(1)
-    dist.barrier()  # let the rank 0 mkdir first
+    dist.barrier(device_ids=[gpu])  # let the rank 0 mkdir first
 
     logger = get_logger(configs['exp_dir'], 'train.log')
     if world_size > 1:
@@ -92,11 +94,15 @@ def train(config='conf/config.yaml', **kwargs):
                             noise_lmdb_file=configs.get('noise_data', None))
     train_dataloader = DataLoader(train_dataset, **configs['dataloader_args'])
     batch_size = configs['dataloader_args']['batch_size']
-    loader_size = len(train_utt_spk_list) // world_size // batch_size
+    if configs['dataset_args'].get('sample_num_per_epoch', 0) > 0:
+        sample_num_per_epoch = configs['dataset_args']['sample_num_per_epoch']
+    else:
+        sample_num_per_epoch = len(train_utt_spk_list)
+    epoch_iter = sample_num_per_epoch // world_size // batch_size
     if rank == 0:
         logger.info("<== Dataloaders ==>")
         logger.info("train dataloaders created")
-        logger.info('loader size: {}'.format(loader_size))
+        logger.info('epoch iteration number: {}'.format(epoch_iter))
 
     # model
     logger.info("<== Model ==>")
@@ -110,14 +116,17 @@ def train(config='conf/config.yaml', **kwargs):
     elif checkpoint is None:
         logger.info('Train model from scratch ...')
     # projection layer
-    configs['projection_args']['embed_dim'] = configs['model_args']['embed_dim']
+    configs['projection_args']['embed_dim'] = configs['model_args'][
+        'embed_dim']
     configs['projection_args']['num_class'] = len(spk2id_dict)
     configs['projection_args']['do_lm'] = configs.get('do_lm', False)
-    if configs['data_type'] != 'feat' and configs['dataset_args']['speed_perturb']:
+    if configs['data_type'] != 'feat' and configs['dataset_args'][
+            'speed_perturb']:
         # diff speed is regarded as diff spk
         configs['projection_args']['num_class'] *= 3
         if configs.get('do_lm', False):
-            logger.info('No speed perturb while doing large margin fine-tuning')
+            logger.info(
+                'No speed perturb while doing large margin fine-tuning')
             configs['dataset_args']['speed_perturb'] = False
     projection = get_projection(configs['projection_args'])
     model.add_module("projection", projection)
@@ -161,7 +170,7 @@ def train(config='conf/config.yaml', **kwargs):
 
     # scheduler
     configs['scheduler_args']['num_epochs'] = configs['num_epochs']
-    configs['scheduler_args']['epoch_iter'] = loader_size
+    configs['scheduler_args']['epoch_iter'] = epoch_iter
     # here, we consider the batch_size 64 as the base, the learning rate will be
     # adjusted according to the batchsize and world_size used in different setup
     configs['scheduler_args']['scale_ratio'] = 1.0 * world_size * configs[
@@ -174,7 +183,7 @@ def train(config='conf/config.yaml', **kwargs):
         logger.info("scheduler is: " + configs['scheduler'])
 
     # margin scheduler
-    configs['margin_update']['epoch_iter'] = loader_size
+    configs['margin_update']['epoch_iter'] = epoch_iter
     margin_scheduler = getattr(schedulers, configs['margin_scheduler'])(
         model=model, **configs['margin_update'])
     if rank == 0:
@@ -188,22 +197,20 @@ def train(config='conf/config.yaml', **kwargs):
             fout.write(data)
 
     # training
-    dist.barrier()  # synchronize here
+    dist.barrier(device_ids=[gpu])  # synchronize here
     if rank == 0:
         logger.info("<========== Training process ==========>")
         header = ['Epoch', 'Batch', 'Lr', 'Margin', 'Loss', "Acc"]
         for line in tp.header(header, width=10, style='grid').split('\n'):
             logger.info(line)
-    dist.barrier()  # synchronize here
+    dist.barrier(device_ids=[gpu])  # synchronize here
 
-    # scaler = torch.cuda.amp.GradScaler(enabled=configs['enable_amp'])
+    scaler = torch.cuda.amp.GradScaler(enabled=configs['enable_amp'])
     for epoch in range(start_epoch, configs['num_epochs'] + 1):
-        # train_sampler.set_epoch(epoch)
         train_dataset.set_epoch(epoch)
 
-        scaler = torch.cuda.amp.GradScaler(enabled=configs['enable_amp'])
         run_epoch(train_dataloader,
-                  loader_size,
+                  epoch_iter,
                   ddp_model,
                   criterion,
                   optimizer,

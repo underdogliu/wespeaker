@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+
+import onnxruntime as ort
 import torch
 import torchaudio
-import argparse
-import onnxruntime as ort
 import torchaudio.compliance.kaldi as kaldi
 
 
@@ -62,12 +63,8 @@ def main():
     feats = compute_fbank(wav_path)
     feats = feats.unsqueeze(0).numpy()  # add batch dimension
 
-    embeddings = session.run(
-        output_names=['embs'],
-        input_feed={
-            'feats': feats
-        }
-    )
+    embeddings = session.run(output_names=['embs'],
+                             input_feed={'feats': feats})
     print(embeddings[0].shape)
 
 

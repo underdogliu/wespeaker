@@ -13,25 +13,26 @@
 # limitations under the License.
 
 import os
-from pprint import pformat
-import fire
-import yaml
-import tableprint as tp
 import re
+from pprint import pformat
 
+import fire
+import tableprint as tp
 import torch
 import torch.distributed as dist
+import yaml
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 import wespeaker.utils.schedulers as schedulers
-from wespeaker.models.speaker_model import get_speaker_model
-from wespeaker.models.projections import get_projection
-from wespeaker.utils.utils import get_logger, parse_config_or_kwargs, set_seed, spk2id
-from wespeaker.utils.file_utils import read_scp
-from wespeaker.utils.executor_deprecated import run_epoch
-from wespeaker.utils.checkpoint import load_checkpoint, save_checkpoint
 from wespeaker.dataset.dataset_deprecated import FeatList_LableDict_Dataset
+from wespeaker.models.projections import get_projection
+from wespeaker.models.speaker_model import get_speaker_model
+from wespeaker.utils.checkpoint import load_checkpoint, save_checkpoint
+from wespeaker.utils.executor_deprecated import run_epoch
+from wespeaker.utils.file_utils import read_scp
+from wespeaker.utils.utils import get_logger, parse_config_or_kwargs, set_seed, \
+    spk2id
 
 
 def train(config='conf/config.yaml', **kwargs):
@@ -118,12 +119,14 @@ def train(config='conf/config.yaml', **kwargs):
     else:
         logger.info('Train model from scratch...')
     # projection layer
-    configs['projection_args']['embed_dim'] = configs['model_args']['embed_dim']
+    configs['projection_args']['embed_dim'] = configs['model_args'][
+        'embed_dim']
     configs['projection_args']['num_class'] = len(spk2id_dict)
-    if configs['feature_args']['raw_wav'] and configs['dataset_args']['speed_perturb']:
+    if configs['feature_args']['raw_wav'] and configs['dataset_args'][
+            'speed_perturb']:
         # diff speed is regarded as diff spk
         configs['projection_args']['num_class'] *= 3
-    configs['projection_args']['do_lm'] = config.get('do_lm', False)
+    configs['projection_args']['do_lm'] = configs.get('do_lm', False)
     projection = get_projection(configs['projection_args'])
     model.add_module("projection", projection)
     if rank == 0:
@@ -157,8 +160,9 @@ def train(config='conf/config.yaml', **kwargs):
         logger.info("loss criterion is: " + configs['loss'])
 
     configs['optimizer_args']['lr'] = configs['scheduler_args']['initial_lr']
-    optimizer = getattr(torch.optim, configs['optimizer'])(
-        ddp_model.parameters(), **configs['optimizer_args'])
+    optimizer = getattr(torch.optim,
+                        configs['optimizer'])(ddp_model.parameters(),
+                                              **configs['optimizer_args'])
     if rank == 0:
         logger.info("<== Optimizer ==>")
         logger.info("optimizer is: " + configs['optimizer'])
@@ -166,9 +170,9 @@ def train(config='conf/config.yaml', **kwargs):
     # scheduler
     configs['scheduler_args']['num_epochs'] = configs['num_epochs']
     configs['scheduler_args']['epoch_iter'] = len(train_dataloader)
-    configs['scheduler_args']['process_num'] = world_size
-    scheduler = getattr(schedulers, configs['scheduler'])(
-        optimizer, **configs['scheduler_args'])
+    scheduler = getattr(schedulers,
+                        configs['scheduler'])(optimizer,
+                                              **configs['scheduler_args'])
     if rank == 0:
         logger.info("<== Scheduler ==>")
         logger.info("scheduler is: " + configs['scheduler'])
@@ -214,8 +218,8 @@ def train(config='conf/config.yaml', **kwargs):
             if epoch % configs['save_epoch_interval'] == 0 or epoch >= configs[
                     'num_epochs'] - configs['num_avg']:
                 save_checkpoint(
-                    model,
-                    os.path.join(model_dir, 'model_{}.pt'.format(epoch)))
+                    model, os.path.join(model_dir,
+                                        'model_{}.pt'.format(epoch)))
 
     if rank == 0:
         os.symlink('model_{}.pt'.format(configs['num_epochs']),

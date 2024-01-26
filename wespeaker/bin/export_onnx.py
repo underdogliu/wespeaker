@@ -17,22 +17,27 @@ from __future__ import print_function
 
 import argparse
 
+import numpy as np
 import torch
+import torch.nn as nn
 import yaml
 
-from wespeaker.utils.checkpoint import load_checkpoint
 from wespeaker.models.speaker_model import get_speaker_model
-import torch.nn as nn
-import numpy as np
+from wespeaker.utils.checkpoint import load_checkpoint
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='export your script model')
     parser.add_argument('--config', required=True, help='config file')
     parser.add_argument('--checkpoint', required=True, help='checkpoint model')
     parser.add_argument('--output_model', required=True, help='output file')
-    parser.add_argument('--mean_vec', required=False, default=None, help='mean vector')
+    parser.add_argument('--mean_vec',
+                        required=False,
+                        default=None,
+                        help='mean vector')
     args = parser.parse_args()
     return args
+
 
 def main():
     args = get_args()
@@ -51,6 +56,7 @@ def main():
         mean_vec = torch.zeros(embed_dim, dtype=torch.float32)
 
     class Model(nn.Module):
+
         def __init__(self, model, mean_vec=None):
             super(Model, self).__init__()
             self.model = model
@@ -72,15 +78,23 @@ def main():
         num_frms = configs['dataset_args'].get('num_frms', 200)
 
     dummy_input = torch.ones(1, num_frms, feat_dim)
-    torch.onnx.export(
-        model, dummy_input,
-        args.output_model,
-        do_constant_folding=True,
-        verbose=False,
-        opset_version=14,
-        input_names=['feats'],
-        output_names=['embs'],
-        dynamic_axes={'feats': {0: 'B', 1: 'T'}, 'embs': {0: 'B'}})
+    torch.onnx.export(model,
+                      dummy_input,
+                      args.output_model,
+                      do_constant_folding=True,
+                      verbose=False,
+                      opset_version=14,
+                      input_names=['feats'],
+                      output_names=['embs'],
+                      dynamic_axes={
+                          'feats': {
+                              0: 'B',
+                              1: 'T'
+                          },
+                          'embs': {
+                              0: 'B'
+                          }
+                      })
 
     # You may further generate tensorrt engine:
     # trtexec --onnx=avg_model.onnx --minShapes=feats:1x200x80 \
@@ -91,6 +105,7 @@ def main():
     # --optShapes=feats:64x200x80 --maxShapes=feats:128x500x80 \
     # --fp16
     # If it is an model with QDQ nodes, please add --int8
+
 
 if __name__ == '__main__':
     main()

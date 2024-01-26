@@ -1,6 +1,7 @@
 # Copyright (c) 2021 Mobvoi Inc. (authors: Binbin Zhang)
 #               2022 Chengdong Liang (liangchengdong@mail.nwpu.edu.cn)
 #               2022 Hongji Wang (jijijiang77@gmail.com)
+#               2023 Zhengyang Chen (chenzhengyang117@gmail.com)
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,7 +55,7 @@ def url_opener(data):
                 stream = open(url, 'rb')
             # network file, such as HTTP(HDFS/OSS/S3)/HTTPS/SCP
             else:
-                cmd = f'curl -s -L {url}'
+                cmd = f'wget -q -O - {url}'
                 process = Popen(cmd, shell=True, stdout=PIPE)
                 sample.update(process=process)
                 stream = process.stdout
@@ -124,6 +125,25 @@ def parse_raw(data):
         Returns:
             Iterable[{key, wav, spk, sample_rate}]
     """
+
+    def read_audio(wav):
+        if wav.endswith('|'):
+            p = Popen(wav[:-1], shell=True, stdout=PIPE)
+            data = p.stdout.read()
+            waveform, sample_rate = torchaudio.load(io.BytesIO(data))
+        else:
+            waveform, sample_rate = torchaudio.load(wav)
+        return waveform, sample_rate
+
+    def apply_vad(waveform, sample_rate, vad):
+        voice_part_list = []
+        for start, end in vad:
+            start, end = float(start), float(end)
+            start, end = int(start * sample_rate), int(end * sample_rate)
+            voice_part_list.append(waveform[:, start:end])
+        waveform = torch.cat(voice_part_list, dim=1)
+        return waveform, sample_rate
+
     for sample in data:
         assert 'src' in sample
         json_line = sample['src']
@@ -135,7 +155,10 @@ def parse_raw(data):
         wav_file = obj['wav']
         spk = obj['spk']
         try:
-            waveform, sample_rate = torchaudio.load(wav_file)
+            waveform, sample_rate = read_audio(wav_file)
+            if 'vad' in obj:
+                waveform, sample_rate = apply_vad(waveform, sample_rate,
+                                                  obj['vad'])
             example = dict(key=key,
                            spk=spk,
                            wav=waveform,
@@ -166,9 +189,7 @@ def parse_feat(data):
         spk = obj['spk']
         try:
             feat = torch.from_numpy(kaldiio.load_mat(feat_ark))
-            example = dict(key=key,
-                           spk=spk,
-                           feat=feat)
+            example = dict(key=key, spk=spk, feat=feat)
             yield example
         except Exception as ex:
             logging.warning('Failed to load {}'.format(feat_ark))
@@ -283,14 +304,68 @@ def get_random_chunk(data, chunk_len):
     if data_len >= chunk_len:
         chunk_start = random.randint(0, data_len - chunk_len)
         data = data[chunk_start:chunk_start + chunk_len]
+        # re-clone the data to avoid memory leakage
+        if type(data) == torch.Tensor:
+            data = data.clone()
+        else:  # np.array
+            data = data.copy()
     else:
         # padding
         repeat_factor = chunk_len // data_len + 1
-        repeat_shape = repeat_factor if len(data_shape) == 1 else (repeat_factor, 1)
-        data = data.repeat(repeat_shape)
+        repeat_shape = repeat_factor if len(data_shape) == 1 else (
+            repeat_factor, 1)
+        if type(data) == torch.Tensor:
+            data = data.repeat(repeat_shape)
+        else:  # np.array
+            data = np.tile(data, repeat_shape)
         data = data[:chunk_len]
 
     return data
+
+
+def filter(data,
+           min_num_frames=100,
+           max_num_frames=800,
+           frame_shift=10,
+           data_type='shard/raw/feat'):
+    """ Filter the utterance with very short duration and random chunk the
+        utterance with very long duration.
+
+        Args:
+            data: Iterable[{key, wav, label, sample_rate}]
+            min_num_frames: minimum number of frames of acoustic features
+            max_num_frames: maximum number of frames of acoustic features
+            frame_shift: the frame shift of the acoustic features (ms)
+        Returns:
+            Iterable[{key, wav, label, sample_rate}]
+    """
+    for sample in data:
+        assert 'key' in sample
+
+        if data_type == 'feat':
+            assert 'feat' in sample
+            feat = sample['feat']
+            if len(feat) < min_num_frames:
+                continue
+            elif len(feat) > max_num_frames:
+                feat = get_random_chunk(feat, max_num_frames)
+            sample['feat'] = feat
+        else:
+            assert 'sample_rate' in sample
+            assert 'wav' in sample
+            sample_rate = sample['sample_rate']
+            wav = sample['wav'][0]
+
+            min_len = int(frame_shift / 1000 * min_num_frames * sample_rate)
+            max_len = int(frame_shift / 1000 * max_num_frames * sample_rate)
+
+            if len(wav) < min_len:
+                continue
+            elif len(wav) > max_len:
+                wav = get_random_chunk(wav, max_len)
+            sample['wav'] = wav.unsqueeze(0)
+
+        yield sample
 
 
 def random_chunk(data, chunk_len, data_type='shard/raw/feat'):
@@ -377,8 +452,7 @@ def add_reverb_noise(data,
                     # Since the noise audio could be very long, it must be
                     # chunked first before resampled (to save time)
                     noise_audio = get_random_chunk(
-                        noise_audio,
-                        int(audio_len / resample_rate * noise_sr))
+                        noise_audio, int(audio_len / resample_rate * noise_sr))
                     noise_audio = signal.resample(noise_audio, audio_len)
                 else:
                     noise_audio = get_random_chunk(noise_audio, audio_len)
